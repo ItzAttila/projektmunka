@@ -1,0 +1,282 @@
+Természetesen, szívesen segítek összeállítani a hálózati konfigurációt a megadott adatok alapján.
+
+A megadott paraméterek szerint a változók:
+
+* **$x = 7$** (Születési hónap) $\rightarrow$ VLAN 10 (ADMIN) hálózat: **192.168.7.0/24**
+* **$y = 11$** (Születési nap) $\rightarrow$ VLAN 20 (HR) hálózat: **192.168.11.0/24**
+
+A VLAN 40 (SALES) pedig a **192.168.30.0/26** alhálózatot használja (utolsó használható IP címe a `.62`).
+
+Az alábbiakban megtalálod a részletes Cisco IOS konfigurációs parancsokat az eszközökre bontva.
+
+---
+
+## 1. MISKOLC Router konfigurációja
+
+Ez a router látja el a Router-on-a-Stick (inter-VLAN routing) feladatot és a DHCP szerver szerepét is a HR és SALES VLAN-ok számára.
+
+```text
+enable
+configure terminal
+
+! --- WAN Interfész beállítása (Budapest felé) ---
+interface GigabitEthernet0/0
+ ip address 10.0.0.1 255.255.255.252
+ encapsulation ppp
+ ppp authentication chap
+ no shutdown
+exit
+
+! --- WAN CHAP Autentikáció ---
+username BUDAPEST password Pool
+
+! --- DHCP Kizárások (Az első 5 cím fenntartott) ---
+ip dhcp excluded-address 192.168.11.1 192.168.11.5
+ip dhcp excluded-address 192.168.30.1 192.168.30.5
+
+! --- DHCP Pool: HR (VLAN 20) ---
+ip dhcp pool HR
+ network 192.168.11.0 255.255.255.0
+ default-router 192.168.11.254
+ dns-server 9.9.9.9
+exit
+
+! --- DHCP Pool: SALES (VLAN 40) ---
+ip dhcp pool SALES
+ network 192.168.30.0 255.255.255.192
+ default-router 192.168.30.62
+ dns-server 9.9.9.9
+exit
+
+! --- LAN Interfész és Alinterfészek (Router-on-a-Stick) ---
+! Az alinterfész száma megegyezik a VLAN számmal, és az utolsó címet kapja.
+
+interface GigabitEthernet0/1
+ no shutdown
+exit
+
+! ADMIN Alinterfész
+interface GigabitEthernet0/1.10
+ encapsulation dot1Q 10
+ ip address 192.168.7.254 255.255.255.0
+exit
+
+! HR Alinterfész
+interface GigabitEthernet0/1.20
+ encapsulation dot1Q 20
+ ip address 192.168.11.254 255.255.255.0
+exit
+
+! SALES Alinterfész
+interface GigabitEthernet0/1.40
+ encapsulation dot1Q 40
+ ip address 192.168.30.62 255.255.255.192
+exit
+
+! NATIVE Alinterfész
+interface GigabitEthernet0/1.1000
+ encapsulation dot1Q 1000 native
+exit
+
+! --- Statikus útvonal a Budapest mögötti hálózatok felé ---
+ip route 172.16.10.0 255.255.255.252 10.0.0.2
+ip route 192.168.200.0 255.255.255.0 10.0.0.2
+end
+write
+
+```
+
+---
+
+## 2. Switch0 (Miskolc oldali Switch) konfigurációja
+
+Itt hozzuk létre a VLAN-okat, beállítjuk a trunk portokat, a hozzáférési (access) portokat, a menedzsment IP-t (az ADMIN vlan 2. címe), és biztonsági okokból a nem használt portokat a Black Hole VLAN-ba mozgatjuk.
+
+```text
+enable
+configure terminal
+
+! --- VLAN-ok létrehozása ---
+vlan 10
+ name ADMIN
+vlan 20
+ name HR
+vlan 40
+ name SALES
+vlan 1000
+ name NATIVE
+vlan 99
+ name Black_Hole
+exit
+
+! --- Trunk portok beállítása (Router és Switch1 felé) ---
+! Feltételezve, hogy a router a fa0/1-es, a másik switch a fa0/2-es portra van kötve
+interface range fastEthernet 0/1 - 2
+ switchport mode trunk
+ switchport trunk native vlan 1000
+exit
+
+! --- Access portok kiosztása ---
+interface range fastEthernet 0/5 - 10
+ switchport mode access
+ switchport access vlan 10
+exit
+
+interface range fastEthernet 0/11 - 15
+ switchport mode access
+ switchport access vlan 20
+exit
+
+interface range fastEthernet 0/16 - 20
+ switchport mode access
+ switchport access vlan 40
+exit
+
+! --- Nem használt portok lekapcsolása és Black Hole-ba tétele ---
+interface range fastEthernet 0/3 - 4, fastEthernet 0/21 - 24, gigabitEthernet 0/1 - 2
+ switchport mode access
+ switchport access vlan 99
+ shutdown
+exit
+
+! --- Switch Menedzsment IP beállítása (ADMIN vlan 2. címe) ---
+interface vlan 10
+ ip address 192.168.7.2 255.255.255.0
+ no shutdown
+exit
+
+ip default-gateway 192.168.7.254
+end
+write
+
+```
+
+---
+
+## 3. Switch1 (Budapest felőli Switch) konfigurációja
+
+A Switch1-nek is ismernie kell a VLAN-okat az átvitelhez, és megkapja az ADMIN vlan 3. címét.
+
+```text
+enable
+configure terminal
+
+! --- VLAN-ok létrehozása ---
+vlan 10
+ name ADMIN
+vlan 20
+ name HR
+vlan 40
+ name SALES
+vlan 1000
+ name NATIVE
+vlan 99
+ name Black_Hole
+exit
+
+! --- Trunk port beállítása (Switch0 felé) ---
+! Feltételezve, hogy a fa0/2 összeköti a két switchet
+interface fastEthernet 0/2
+ switchport mode trunk
+ switchport trunk native vlan 1000
+exit
+
+! --- Nem használt portok lekapcsolása ---
+interface range fastEthernet 0/1, fastEthernet 0/3 - 24, gigabitEthernet 0/1 - 2
+ switchport mode access
+ switchport access vlan 99
+ shutdown
+exit
+
+! --- Switch Menedzsment IP beállítása (ADMIN vlan 3. címe) ---
+interface vlan 10
+ ip address 192.168.7.3 255.255.255.0
+ no shutdown
+exit
+
+ip default-gateway 192.168.7.254
+end
+write
+
+```
+
+---
+
+## 4. BUDAPEST Router konfigurációja
+
+```text
+enable
+configure terminal
+
+! --- WAN Interfész (Miskolc felé) ---
+interface GigabitEthernet0/0
+ ip address 10.0.0.2 255.255.255.252
+ encapsulation ppp
+ ppp authentication chap
+ no shutdown
+exit
+
+! --- WAN CHAP Autentikáció ---
+username MISKOLC password Pool
+
+! --- LAN Interfész (A vezeték nélküli router felé) ---
+interface GigabitEthernet0/1
+ ip address 172.16.10.1 255.255.255.252
+ no shutdown
+exit
+
+! --- Statikus útvonalak a belső LAN-ok és a Wi-Fi felé ---
+ip route 192.168.7.0 255.255.255.0 10.0.0.1
+ip route 192.168.11.0 255.255.255.0 10.0.0.1
+ip route 192.168.30.0 255.255.255.192 10.0.0.1
+ip route 192.168.200.0 255.255.255.0 172.16.10.2
+end
+write
+
+```
+
+---
+
+## 5. WRT300N Wireless Router (Grafikus felület beállításai)
+
+Mivel a WRT300N-t Packet Tracerben többnyire a **GUI (Grafikus felület)** lapon kell beállítani, az alábbi értékeket kell megadnod a megfelelő menüpontokban:
+
+### Internet Setup (Setup -> Basic Setup)
+
+* **Internet Connection Type:** Static IP
+* **Internet IP Address:** `172.16.10.2`
+* **Subnet Mask:** `255.255.255.252`
+* **Default Gateway:** `172.16.10.1`
+* **Static DNS 1:** `9.9.9.9`
+
+### Network Setup / LAN (Setup -> Basic Setup)
+
+* **IP Address:** `192.168.200.1`
+* **Subnet Mask:** `255.255.255.0`
+* **DHCP Server:** Enabled
+* **Start IP Address:** `192.168.200.110`  *(Így a kliensek 110 és 120 között kapnak címeket)*
+* **Maximum Number of DHCP Users:** `11` (110-től 120-ig pontosan 11 cím)
+* *Kattints a lap alján a **Save Settings** gombra!*
+
+### Wireless Basic Settings (Wireless -> Basic Wireless Settings)
+
+* **Network Name (SSID):** `teszt`
+* *Kattints a **Save Settings** gombra!*
+
+### Wireless Security (Wireless -> Wireless Security)
+
+* **Security Mode:** WPA2 Personal
+* **Encryption:** AES
+* **Passphrase / Pre-shared Key:** `Pool`
+* *Kattints a **Save Settings** gombra!*
+
+---
+
+### Okostelefon (Smartphone) csatlakozása
+
+Nyisd meg a Smartphone-t, menj a **Config -> Wireless0** fülre:
+
+* **SSID:** `teszt`
+* **Authentication:** WPA2-PSK
+* **PSK Passphrase:** `Pool`
+* Az IP beállításoknál válaszd a **DHCP** opciót, és automatikusan meg fogja kapni a `192.168.200.110` (vagy ahhoz közeli) IP-címet.
